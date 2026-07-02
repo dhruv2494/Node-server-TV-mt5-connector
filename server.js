@@ -1,6 +1,5 @@
 require('dotenv').config()
 const express = require('express')
-const { sendToMT5 } = require('./mt5Bridge')
 
 const app = express()
 app.use(express.json())
@@ -8,47 +7,79 @@ app.use(express.json())
 const PORT = process.env.PORT || 3000
 const SECRET_TOKEN = process.env.SECRET_TOKEN
 
-// Health check route
+// Signal queue — only ONE pending signal at a time
+let pendingSignal = null
+
+// Health check
 app.get('/', (req, res) => {
-  res.send('TradingView → MT5 Bridge is running ✅')
+  res.json({ status: 'TV-MT5 Bridge running ✅', pending: pendingSignal })
 })
 
-// Webhook route
-app.post('/webhook', async (req, res) => {
+// TradingView webhook — receives BUY or SELL signal
+app.post('/webhook', (req, res) => {
 
-  // 1. Validate secret token
+  // Validate token
   const token = req.query.token || req.headers['x-token']
   if (token !== SECRET_TOKEN) {
-    console.warn('[Webhook] Unauthorized request blocked')
+    console.warn('[Webhook] Unauthorized blocked')
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
-  // 2. Parse payload from TradingView
   const { action, symbol, volume } = req.body
 
+  // Validate required fields
   if (!action || !symbol) {
     return res.status(400).json({ error: 'Missing action or symbol' })
   }
 
-  console.log(`[Webhook] Signal received → Action: ${action} | Symbol: ${symbol} | Volume: ${volume}`)
-
-  // 3. Build MT5 command
-  const payload = {
-    action: action.toUpperCase(), // BUY or SELL
-    symbol: symbol,               // XAUUSD
-    volume: volume || 0.01        // default 0.01 lot
+  const validActions = ['BUY', 'SELL']
+  if (!validActions.includes(action.toUpperCase())) {
+    return res.status(400).json({ error: 'Invalid action. Must be BUY or SELL' })
   }
 
-  // 4. Send to MT5 EA via TCP socket
-  try {
-    const response = await sendToMT5(payload)
-    console.log(`[Webhook] MT5 responded: ${response}`)
-    return res.status(200).json({ success: true, mt5Response: response })
-  } catch (err) {
-    console.error(`[Webhook] Failed to send to MT5: ${err.message}`)
-    return res.status(500).json({ error: 'Failed to reach MT5 EA' })
+  // Store signal — overwrite any previous pending
+  pendingSignal = {
+    action: action.toUpperCase(),
+    symbol: symbol.toUpperCase(),
+    volume: parseFloat(volume) || 0.01,
+    timestamp: new Date().toISOString()
   }
 
+  console.log(`[Webhook] Signal stored → ${pendingSignal.action} ${pendingSignal.symbol} vol:${pendingSignal.volume}`)
+  return res.status(200).json({ success: true, signal: pendingSignal })
+})
+
+// MT5 EA polls this every 2 seconds
+app.get('/signal', (req, res) => {
+
+  // Validate token
+  const token = req.query.token || req.headers['x-token']
+  if (token !== SECRET_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  if (!pendingSignal) {
+    return res.status(200).json({ action: 'NONE' })
+  }
+
+  // Return signal and clear queue
+  const signal = pendingSignal
+  pendingSignal = null
+  console.log(`[Signal] Sent to MT5 → ${signal.action} ${signal.symbol}`)
+  return res.status(200).json(signal)
+})
+
+// MT5 EA confirms execution result
+app.post('/confirm', (req, res) => {
+
+  const token = req.query.token || req.headers['x-token']
+  if (token !== SECRET_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const { status, action, symbol, message } = req.body
+  console.log(`[Confirm] MT5 → Status:${status} | Action:${action} | Symbol:${symbol} | Msg:${message}`)
+  return res.status(200).json({ received: true })
 })
 
 app.listen(PORT, () => {
