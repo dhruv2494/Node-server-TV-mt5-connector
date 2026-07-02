@@ -1,0 +1,6 @@
+
+buy signal
+{"action":"BUY","symbol":"XAUUSD.s","volume":0.01}
+
+sell signal
+{"action":"SELL","symbol":"XAUUSD.s","volume":0.01}

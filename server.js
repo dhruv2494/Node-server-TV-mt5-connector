@@ -4,15 +4,20 @@ const express = require('express')
 const app = express()
 app.use(express.json())
 
-const PORT = process.env.PORT || 3000
+const PORT         = process.env.PORT         || 3000
 const SECRET_TOKEN = process.env.SECRET_TOKEN
+const SIGNAL_EXPIRY_MS = 120000 // 2 minutes — stale signal discard
 
 // Signal queue — only ONE pending signal at a time
 let pendingSignal = null
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'TV-MT5 Bridge running ✅', pending: pendingSignal })
+  res.json({
+    status  : 'TV-MT5 Bridge running ✅',
+    pending : pendingSignal,
+    time    : new Date().toISOString()
+  })
 })
 
 // TradingView webhook — receives BUY or SELL signal
@@ -39,13 +44,13 @@ app.post('/webhook', (req, res) => {
 
   // Store signal — overwrite any previous pending
   pendingSignal = {
-    action: action.toUpperCase(),
-    symbol: symbol.toUpperCase(),
-    volume: parseFloat(volume) || 0.01,
+    action   : action.toUpperCase(),
+    symbol   : symbol.toUpperCase(),
+    volume   : parseFloat(volume) || 0.01,
     timestamp: new Date().toISOString()
   }
 
-  console.log(`[Webhook] Signal stored → ${pendingSignal.action} ${pendingSignal.symbol} vol:${pendingSignal.volume}`)
+  console.log(`[Webhook] Signal stored → ${pendingSignal.action} ${pendingSignal.symbol} vol:${pendingSignal.volume} at ${pendingSignal.timestamp}`)
   return res.status(200).json({ success: true, signal: pendingSignal })
 })
 
@@ -62,10 +67,17 @@ app.get('/signal', (req, res) => {
     return res.status(200).json({ action: 'NONE' })
   }
 
-  // Return signal and clear queue
-  const signal = pendingSignal
+  // Discard stale signal older than 2 minutes
+  const signalAge = Date.now() - new Date(pendingSignal.timestamp).getTime()
+  if (signalAge > SIGNAL_EXPIRY_MS) {
+    console.warn(`[Signal] DISCARDED — stale signal ${Math.round(signalAge / 1000)}s old → ${pendingSignal.action}`)
+    pendingSignal = null
+    return res.status(200).json({ action: 'NONE' })
+  }
+
+  const signal  = pendingSignal
   pendingSignal = null
-  console.log(`[Signal] Sent to MT5 → ${signal.action} ${signal.symbol}`)
+  console.log(`[Signal] Sent to MT5 → ${signal.action} ${signal.symbol} (age: ${Math.round(signalAge / 1000)}s)`)
   return res.status(200).json(signal)
 })
 
